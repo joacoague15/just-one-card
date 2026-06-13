@@ -36,6 +36,12 @@ func _ready() -> void:
 	editor.pressed.connect(_on_editor)
 	box.add_child(editor)
 
+	var characters := Button.new()
+	characters.text = "Personajes"
+	UiKit.style_button(characters, UiKit.COL_DEF)
+	characters.pressed.connect(_on_characters)
+	box.add_child(characters)
+
 	var quit := Button.new()
 	quit.text = "Salir"
 	UiKit.style_button(quit, UiKit.COL_NEUTRAL)
@@ -50,6 +56,10 @@ func _on_play() -> void:
 
 func _on_editor() -> void:
 	get_tree().change_scene_to_file("res://editor.tscn")
+
+
+func _on_characters() -> void:
+	get_tree().change_scene_to_file("res://character_gallery.tscn")
 
 
 func _on_quit() -> void:
