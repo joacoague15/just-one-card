@@ -4,6 +4,15 @@ extends Control
 
 const STAT_NAMES := {"speed": "Velocidad", "attack": "Ataque", "defense": "Defensa", "range": "Alcance"}
 
+# Intro de nivel: el wizard asoma de la cintura para arriba con ojos que siguen
+# al mouse. Centros y radio de cada ojo como fracción del tamaño de la imagen
+# (detectados sobre player_wizard.png, 864x1080).
+const WIZARD_TEX := "res://sprites/player_wizard.png"
+const WIZARD_EYES := [
+	{"c": Vector2(0.362, 0.353), "r": 0.069},
+	{"c": Vector2(0.643, 0.338), "r": 0.055},
+]
+
 # Paleta compartida (UiKit)
 const COL_BG := UiKit.COL_BG
 const COL_PANEL := UiKit.COL_PANEL
@@ -41,6 +50,7 @@ var undo_button: Button
 var reward_panel: Control
 var end_panel: Control
 var vignette: ColorRect
+var wizard_corner: Control
 
 var selected_die := -1
 var hover_cell := Vector2i(-1, -1)
@@ -219,6 +229,7 @@ func _make_overlay() -> Control:
 	var dim := ColorRect.new()
 	dim.color = Color(0.05, 0.04, 0.08, 0.6)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.z_index = 60  # por encima del acompañante de esquina
 	dim.hide()
 	add_child(dim)
 	var center := CenterContainer.new()
@@ -287,6 +298,7 @@ func _begin_level(index: int) -> void:
 		_on_level_cleared()
 		_refresh()
 		return
+	_spawn_corner_wizard()  # acompañante en la esquina inferior izquierda
 	_start_turn()
 
 
@@ -296,6 +308,24 @@ func _start_turn() -> void:
 	selected_die = -1
 	_refresh()
 	_auto_roll()  # la tirada es automática (corre como corrutina)
+
+
+## Acompañante de nivel: el wizard asoma de la cintura para arriba en la esquina
+## inferior izquierda (con dos pupilas negras que siguen al mouse) y se queda ahí
+## todo el nivel. No atenúa la pantalla ni bloquea los clics del tablero.
+func _spawn_corner_wizard() -> void:
+	if is_instance_valid(wizard_corner):
+		wizard_corner.queue_free()
+	var wiz := WizardCorner.new()
+	wiz.main = self
+	wiz.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wiz.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(wiz)
+	wizard_corner = wiz
+	# Pequeña animación de entrada: sube desde abajo y se queda.
+	wiz.reveal = 0.0
+	var tw := create_tween()
+	tw.tween_property(wiz, "reveal", 1.0, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
 ## Tirada automática al empezar el turno: el jugador ya no aprieta un botón.
@@ -1166,3 +1196,50 @@ class HealthBar:
 		for i in max_value:
 			sb.bg_color = Color("e84d5f") if i < value else Color("221f2b")
 			draw_style_box(sb, Rect2(i * (w + gap), 0, w, size.y))
+
+
+## Acompañante de esquina: dibuja al wizard de la cintura para arriba pegado a la
+## esquina inferior izquierda (la parte de abajo queda fuera de pantalla) y dos
+## pupilas negras sobre sus ojos que siguen al mouse. `reveal` (0..1) controla la
+## animación de entrada desde abajo. El nodo ocupa toda la pantalla pero solo
+## dibuja en la esquina.
+class WizardCorner:
+	extends Control
+
+	const DISP_W := 235.0     # ancho en pantalla del wizard
+	const CUT := 0.60         # fracción de la imagen que se muestra (de arriba a la cintura)
+	const MARGIN_LEFT := 6.0  # separación del borde izquierdo
+
+	var main
+	var tex: Texture2D
+	var reveal := 0.0
+
+	func _ready() -> void:
+		tex = load(main.WIZARD_TEX)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _process(_delta: float) -> void:
+		queue_redraw()
+
+	func _draw() -> void:
+		if tex == null:
+			return
+		var iw := float(tex.get_width())
+		var ih := float(tex.get_height())
+		var scale := DISP_W / iw
+		var disp_h := ih * scale
+		var visible_h := disp_h * CUT
+		var left_x := MARGIN_LEFT
+		# En reveal=1 el corte (cintura) queda en el borde inferior; en reveal=0
+		# la imagen está totalmente por debajo de la pantalla.
+		var top_y := (size.y - visible_h) + (1.0 - reveal) * visible_h
+		draw_texture_rect(tex, Rect2(left_x, top_y, DISP_W, disp_h), false)
+
+		var mouse := get_local_mouse_position()
+		for eye in main.WIZARD_EYES:
+			var center := Vector2(left_x + eye.c.x * DISP_W, top_y + eye.c.y * disp_h)
+			var eye_r: float = eye.r * DISP_W
+			var pupil_r := eye_r * 0.6
+			var travel := maxf(eye_r - pupil_r, 0.0) * 0.8
+			var offset := (mouse - center).limit_length(travel)
+			draw_circle(center + offset, pupil_r, Color.BLACK)

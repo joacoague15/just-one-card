@@ -66,7 +66,7 @@ amable sin perder profundidad táctica:
   visión.
   - `daño = floor(attack_points / defensa_del_monstruo)` (bloques completos).
   - Si tu ataque no llega ni a un bloque completo, no podés concretar el golpe
-    (0 de daño).
+	(0 de daño).
   - Una vez usado el ataque, no podés volver a atacar hasta el próximo turno.
 - **Deshacer**: el botón **"Deshacer"** revierte la última acción (movimiento o
   ataque) paso a paso, mientras siga siendo tu turno. Restaura tu posición y
@@ -183,4 +183,11 @@ Todo dibujado con `_draw()` en clases internas:
   daño previsto) y registro con color (`RichTextLabel`).
 - Animaciones: *pop-in* elástico, movimiento por camino, muerte (escala+fade),
   *flash*, texto flotante, rayo de ataque, viñeta de daño y *shake* de cámara.
+- **Acompañante de esquina** (`_spawn_corner_wizard` + clase `WizardCorner`): al
+  empezar cada nivel, el wizard (`sprites/player_wizard.png`) asoma de la cintura
+  para arriba en la **esquina inferior izquierda** (con una breve animación de
+  entrada) y **se queda ahí** todo el nivel. Tiene **dos pupilas negras** sobre
+  sus ojos que **siguen al mouse**. No atenúa la pantalla ni bloquea los clics del
+  tablero (`mouse_filter = IGNORE`). Las posiciones de los ojos están en
+  `WIZARD_EYES` (fracción del tamaño de la imagen).
 </content>
