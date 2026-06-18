@@ -37,12 +37,14 @@ var die_views: Array = []
 var slot_views := {}
 var roll_button: Button
 var end_button: Button
+var undo_button: Button
 var reward_panel: Control
 var end_panel: Control
 var vignette: ColorRect
 
 var selected_die := -1
 var hover_cell := Vector2i(-1, -1)
+var telegraph := {}  # predicción de la fase de monstruos (intención enemiga)
 var log_lines: Array = []
 var busy := false
 var rolling := false
@@ -139,7 +141,7 @@ func _build_ui() -> void:
 	roll_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	roll_button.size_flags_vertical = Control.SIZE_FILL
 	_style_button(roll_button, COL_ENERGY)
-	roll_button.pressed.connect(_on_roll_pressed)
+	roll_button.pressed.connect(_on_reroll_pressed)
 	dice_row.add_child(roll_button)
 	for i in 3:
 		var d := DieView.new()
@@ -170,11 +172,21 @@ func _build_ui() -> void:
 	hud.hover.custom_minimum_size = Vector2(0, 56)
 	ibox.add_child(hud.hover)
 
+	var action_row := HBoxContainer.new()
+	action_row.add_theme_constant_override("separation", 10)
+	panel.add_child(action_row)
+	undo_button = Button.new()
+	undo_button.text = "Deshacer"
+	undo_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_button(undo_button, COL_NEUTRAL)
+	undo_button.pressed.connect(_on_undo_pressed)
+	action_row.add_child(undo_button)
 	end_button = Button.new()
 	end_button.text = "Terminar fase del aventurero"
+	end_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_style_button(end_button, COL_GOLD)
 	end_button.pressed.connect(_end_player_phase)
-	panel.add_child(end_button)
+	action_row.add_child(end_button)
 
 	var lbox := _section(panel, "REGISTRO", true)
 	hud.log = RichTextLabel.new()
@@ -270,11 +282,12 @@ func _begin_level(index: int) -> void:
 	_rebuild_units()
 	var level_name: String = LevelStore.levels()[index].name
 	_log("— %s —" % level_name, COL_GOLD.to_html(false))
-	_start_turn()
 	if state.monsters.is_empty():
 		# Nivel sin enemigos (posible desde el editor): se completa solo.
 		_on_level_cleared()
 		_refresh()
+		return
+	_start_turn()
 
 
 func _start_turn() -> void:
@@ -282,13 +295,32 @@ func _start_turn() -> void:
 	state.new_turn()
 	selected_die = -1
 	_refresh()
+	_auto_roll()  # la tirada es automática (corre como corrutina)
 
 
-func _on_roll_pressed() -> void:
-	if state.phase != GameState.Phase.ASSIGN_DICE or state.dice_rolled or rolling:
-		return
-	rolling = true
+## Tirada automática al empezar el turno: el jugador ya no aprieta un botón.
+func _auto_roll() -> void:
 	state.roll_dice()
+	await _roll_animation()
+	_log("Dados: %d, %d y %d. Asignalos a las habilidades." % state.dice, "#cfc8e0")
+	_refresh()
+
+
+## Poder de re-roll (una vez por nivel): vuelve a tirar y limpia la asignación.
+func _on_reroll_pressed() -> void:
+	if rolling or state.phase != GameState.Phase.ASSIGN_DICE or not state.reroll_available:
+		return
+	if not state.reroll_dice():
+		return
+	await _roll_animation()
+	_log("¡Re-roll del poder! Nuevos dados: %d, %d y %d." % state.dice, "#b08be8")
+	_refresh()
+
+
+## Animación compartida: hace girar los dados; los valores finales ya están en
+## state.dice (los pone _refresh al terminar).
+func _roll_animation() -> void:
+	rolling = true
 	_refresh()
 	for step in 7:
 		for d in die_views:
@@ -297,7 +329,6 @@ func _on_roll_pressed() -> void:
 		await get_tree().create_timer(0.06).timeout
 	rolling = false
 	_select_next_free_die()
-	_log("Dados: %d, %d y %d. Asignalos a las habilidades." % state.dice, "#cfc8e0")
 	_refresh()
 
 
@@ -339,16 +370,19 @@ func board_clicked(cell: Vector2i) -> void:
 	var m := state.monster_at(cell)
 	if not m.is_empty():
 		var info := state.player_attack_info(m)
+		var atk := state.attack_points
+		var def: int = m.defense
 		if state.player_attack(m):
 			_attack_beam(state.player_pos, cell, COL_GOLD)
-			_float_text(cell, "-1", COL_DANGER)
+			_float_text(cell, "-%d" % info.damage, COL_DANGER)
+			_log(_division_breakdown(atk, def, info.damage), "#cfc8e0")
 			if m.hp <= 0:
-				_log("Atacaste a %s (-%d ataque): ¡muere!" % [m.name, info.cost], "#ffd28a")
+				_log("Atacaste a %s — Daño final: %d. ¡Muere!" % [m.name, info.damage], "#ffd28a")
 				_kill_unit(m.id)
 				if state.monsters.is_empty():
 					_on_level_cleared()
 			else:
-				_log("Atacaste a %s (-%d ataque): le queda %d PV." % [m.name, info.cost, m.hp], "#ffd28a")
+				_log("Atacaste a %s — Daño final: %d. Le quedan %d PV." % [m.name, info.damage, m.hp], "#ffd28a")
 				if units.has(m.id):
 					units[m.id].hp = m.hp
 					_flash_unit(units[m.id])
@@ -383,20 +417,44 @@ func board_hovered(cell: Vector2i) -> void:
 
 
 func _attack_short_reason(info: Dictionary) -> String:
+	if info.already_attacked:
+		return "Ya atacaste"
 	if not info.in_range:
 		return "Fuera de alcance"
 	if not info.los:
 		return "Sin visión"
-	return "Sin puntos"
+	return "Sin bloque"
 
 
 func _attack_block_reason(m: Dictionary, info: Dictionary) -> String:
+	if info.already_attacked:
+		return "Ya usaste tu ataque este turno."
 	if not info.in_range:
 		var d := "∞" if info.dist < 0 else str(info.dist)
 		return "%s fuera de alcance (distancia %s, alcance %d)." % [m.name, d, state.base.range]
 	if not info.los:
 		return "No hay línea de visión hacia %s." % m.name
-	return "Te faltan puntos de ataque: cuesta %d y tenés %d." % [info.cost, state.attack_points]
+	return "Tu ataque (%d) no completa ni un bloque de la defensa de %s (defensa %d) → 0 de daño." % [
+		state.attack_points, m.name, m.defense]
+
+
+## Explica una resolución por división al estilo "bloques completos".
+## Ej.: Ataque 7 contra Defensa 3 → 7 contiene 2 bloque(s) completo(s) de 3 → Daño final: 2.
+func _division_breakdown(attack: int, defense: int, dmg: int) -> String:
+	var bloques := "bloque completo" if dmg == 1 else "bloques completos"
+	return "Ataque %d contra Defensa %d: %d contiene %d %s de %d." % [
+		attack, defense, attack, dmg, bloques, defense]
+
+
+# --- Deshacer ---
+
+func _on_undo_pressed() -> void:
+	if busy or state.phase != GameState.Phase.PLAYER or not state.can_undo():
+		return
+	state.undo()
+	_rebuild_units(false)  # sin animación de aparición: el undo es instantáneo
+	_log("Deshiciste tu última acción.", "#9b94ae")
+	_refresh()
 
 
 # --- Fase de monstruos ---
@@ -462,8 +520,9 @@ func _run_monster_phase() -> void:
 	else:
 		_float_text(state.player_pos, "¡Bloqueado!", COL_DEF)
 	var log_col := "#ff9d8a" if dmg > 0 else "#8fc7ff"
-	_log("Atacan %d monstruo(s): ataque %d vs defensa %d → %d de daño." % [
-		attackers.size(), total, state.defense_total, dmg], log_col)
+	_log("Atacan %d monstruo(s) por %d contra tu Defensa %d." % [
+		attackers.size(), total, state.defense_total], log_col)
+	_log(_division_breakdown(total, state.defense_total, dmg), log_col)
 	_refresh()
 	await get_tree().create_timer(0.6).timeout
 
@@ -541,7 +600,7 @@ func _back_to_menu() -> void:
 
 # --- Unidades y animaciones ---
 
-func _rebuild_units() -> void:
+func _rebuild_units(animate: bool = true) -> void:
 	for u in units.values():
 		u.queue_free()
 	units.clear()
@@ -557,7 +616,8 @@ func _rebuild_units() -> void:
 	player_unit.radius = tile * 0.30
 	player_unit.position = _cell_center(state.player_pos)
 	board.add_child(player_unit)
-	_pop_in(player_unit, 0.0)
+	if animate:
+		_pop_in(player_unit, 0.0)
 
 	var delay := 0.08
 	for m in state.monsters:
@@ -571,8 +631,9 @@ func _rebuild_units() -> void:
 		u.position = _cell_center(m.pos)
 		board.add_child(u)
 		units[m.id] = u
-		_pop_in(u, delay)
-		delay += 0.08
+		if animate:
+			_pop_in(u, delay)
+			delay += 0.08
 
 
 func _pop_in(unit: Node2D, delay: float) -> void:
@@ -673,13 +734,9 @@ func _refresh() -> void:
 		state.base.speed, state.base.attack, state.base.defense, state.base.range]
 
 	var assigning: bool = state.phase == GameState.Phase.ASSIGN_DICE
-	roll_button.disabled = not assigning or state.dice_rolled or rolling
-	if not state.dice_rolled:
-		roll_button.text = "Tirar dados"
-	elif assigning:
-		roll_button.text = "Asigná los dados"
-	else:
-		roll_button.text = "Dados usados"
+	# El botón es el poder de re-roll (una vez por nivel); la tirada normal es automática.
+	roll_button.disabled = not assigning or rolling or not state.reroll_available
+	roll_button.text = "Re-roll (poder · 1 por nivel)" if state.reroll_available else "Re-roll usado"
 
 	for i in 3:
 		var d: DieView = die_views[i]
@@ -707,17 +764,22 @@ func _refresh() -> void:
 			match stat:
 				"speed":
 					s.big = str(state.speed_points)
-					s.small = "puntos restantes"
+					s.small = "movimiento restante"
 				"attack":
-					s.big = str(state.attack_points)
-					s.small = "puntos restantes"
+					if state.has_attacked:
+						s.big = "✓"
+						s.small = "ataque usado"
+					else:
+						s.big = str(state.attack_points)
+						s.small = "daño = ataque ÷ def"
 				"defense":
 					s.big = str(state.defense_total)
-					s.small = "total del turno"
+					s.small = "defensa del turno"
 		s.queue_redraw()
 
 	_refresh_monster_rows()
 	end_button.disabled = busy or state.phase != GameState.Phase.PLAYER
+	undo_button.disabled = busy or state.phase != GameState.Phase.PLAYER or not state.can_undo()
 	if is_instance_valid(player_unit):
 		player_unit.hp = state.health
 		player_unit.max_hp = state.max_health
@@ -726,13 +788,16 @@ func _refresh() -> void:
 		if units.has(m.id):
 			units[m.id].hp = m.hp
 			units[m.id].queue_redraw()
+	# Telegrafiado: se recalcula en cada refresco (tras moverte o atacar), así la
+	# intención enemiga refleja siempre tu posición actual.
+	telegraph = state.predict_monster_phase() if state.phase == GameState.Phase.PLAYER else {}
 	_update_hover_label()
 
 
 func _refresh_banner() -> void:
 	match state.phase:
 		GameState.Phase.ASSIGN_DICE:
-			_set_banner("FASE DE ENERGÍA — tirá y asigná los dados", COL_ENERGY)
+			_set_banner("FASE DE ENERGÍA — asigná los dados", COL_ENERGY)
 		GameState.Phase.PLAYER:
 			_set_banner("FASE DEL AVENTURERO — movete y atacá", COL_GOLD)
 		GameState.Phase.MONSTERS:
@@ -808,17 +873,21 @@ func _update_hover_label() -> void:
 					var info := state.player_attack_info(m)
 					var status: String
 					if info.can_attack:
-						status = "click para atacar (te alcanza para %d golpe(s))" % info.hits_affordable
+						status = "click para atacar — %d ÷ %d = %d de daño" % [
+							state.attack_points, m.defense, info.damage]
+					elif info.already_attacked:
+						status = "ya atacaste este turno"
 					elif not info.in_range:
 						status = "fuera de alcance"
 					elif not info.los:
 						status = "sin línea de visión"
 					else:
-						status = "sin puntos suficientes"
+						status = "tu ataque %d no completa un bloque de %d (0 de daño)" % [
+							state.attack_points, m.defense]
 					var in_range_txt := "sí" if info.in_range else "no"
 					var los_txt := "sí" if info.los else "no"
-					text += "\nEn alcance: %s | Visión: %s | Costo por golpe: %d — %s" % [
-						in_range_txt, los_txt, info.cost, status]
+					text += "\nEn alcance: %s | Visión: %s | Daño: %d — %s" % [
+						in_range_txt, los_txt, info.damage, status]
 			elif state.phase == GameState.Phase.PLAYER and not busy:
 				var reachable := state.player_reachable()
 				if reachable.has(hover_cell):
@@ -831,11 +900,15 @@ func _update_hover_label() -> void:
 func _phase_hint() -> String:
 	match state.phase:
 		GameState.Phase.ASSIGN_DICE:
-			if not state.dice_rolled:
-				return "Tirá los 3 dados de energía para empezar el turno."
-			return "Click en un dado y luego en una habilidad para asignarlo."
+			if not state.dice_rolled or rolling:
+				return "Tirando los dados..."
+			var extra := "  Tenés un re-roll disponible (poder, 1 por nivel)." if state.reroll_available else ""
+			return "Click en un dado y luego en una habilidad para asignarlo." + extra
 		GameState.Phase.PLAYER:
-			return "Click en una casilla verde para moverte, o en un monstruo para atacarlo."
+			var pd: int = telegraph.get("predicted_damage", 0)
+			if pd > 0:
+				return "Si terminás el turno así, los monstruos te harán %d de daño. Las flechas muestran su intención." % pd
+			return "Click para moverte o atacar. Las flechas muestran la intención enemiga (ahora no te alcanzan)."
 		GameState.Phase.MONSTERS:
 			return "Los monstruos se mueven y atacan..."
 	return ""
@@ -895,9 +968,52 @@ func draw_board(c: Control) -> void:
 			if info.can_attack:
 				c.draw_arc(_cell_center(m.pos), tile * 0.4 + pulse * 3.0, 0, TAU, 40,
 					Color(1.0, 0.32, 0.2, 0.55 + pulse * 0.35), 3.0)
+		_draw_telegraph(c, font, pulse)
 
 	if GridLogic.in_bounds(hover_cell, state.grid_size):
 		c.draw_style_box(_hover_sb, _cell_rect(hover_cell))
+
+
+# --- Telegrafiado de la fase de monstruos ---
+
+## Dibuja la intención prevista de los monstruos: flecha de movimiento, línea de
+## amenaza hacia el aventurero y el daño que recibiría si terminara el turno así.
+func _draw_telegraph(c: Control, font: Font, pulse: float) -> void:
+	if telegraph.is_empty():
+		return
+	var moves: Dictionary = telegraph.get("moves", {})
+	var attackers: Array = telegraph.get("attackers", [])
+	for m in state.monsters:
+		var dest: Vector2i = moves.get(m.id, m.pos)
+		if dest != m.pos:
+			_draw_intent_arrow(c, m.pos, dest)
+		if attackers.has(m.id):
+			var threat := Color(COL_DANGER.r, COL_DANGER.g, COL_DANGER.b, 0.30 + pulse * 0.2)
+			c.draw_line(_cell_center(dest), _cell_center(state.player_pos), threat, 2.5)
+	var pd: int = telegraph.get("predicted_damage", 0)
+	var badge := _cell_center(state.player_pos) + Vector2(0, -tile * 0.46)
+	if pd > 0:
+		c.draw_string(font, badge + Vector2(-tile * 0.3, 0), "‼ -%d" % pd,
+			HORIZONTAL_ALIGNMENT_CENTER, tile * 0.6, 15, COL_DANGER)
+	elif not attackers.is_empty():
+		c.draw_string(font, badge + Vector2(-tile * 0.3, 0), "✓ 0",
+			HORIZONTAL_ALIGNMENT_CENTER, tile * 0.6, 15, COL_DEF)
+
+
+func _draw_intent_arrow(c: Control, from_cell: Vector2i, to_cell: Vector2i) -> void:
+	var a := _cell_center(from_cell)
+	var b := _cell_center(to_cell)
+	var col := Color(COL_GOLD.r, COL_GOLD.g, COL_GOLD.b, 0.55)
+	var dir := (b - a).normalized()
+	var tip := b - dir * (tile * 0.30)  # se corta antes para no tapar la ficha
+	c.draw_line(a, tip, col, 2.5)
+	var perp := Vector2(-dir.y, dir.x)
+	var head := tile * 0.10
+	c.draw_colored_polygon(PackedVector2Array([
+		tip + dir * head,
+		tip + perp * head,
+		tip - perp * head,
+	]), col)
 
 
 # --- Vistas con dibujo propio ---

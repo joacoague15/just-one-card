@@ -17,8 +17,7 @@ func _run(main: Control) -> void:
 	await _frames(15)
 	await _shot("01_inicio.png")
 
-	# Fase de energía: tirar (con animación) y asignar dados.
-	main._on_roll_pressed()
+	# Fase de energía: la tirada es automática al empezar el turno; solo esperamos.
 	await create_timer(0.9).timeout
 	await _shot("02_dados.png")
 	for pair in [[0, "speed"], [1, "attack"], [2, "defense"]]:

@@ -17,6 +17,8 @@ func _initialize() -> void:
 	_check_damage_formula()
 	_check_level_setup()
 	_check_player_rules()
+	_check_reroll_power()
+	_check_undo()
 	_check_monster_ai()
 	_check_level_store()
 	_check_main_script_compiles()
@@ -74,10 +76,11 @@ func _check_line_of_sight() -> void:
 
 
 func _check_damage_formula() -> void:
-	_expect(floori(12.0 / 7.0) == 1, "floor(12/7) = 1")
-	_expect(floori(12.0 / 4.0) == 3, "floor(12/4) = 3")
-	_expect(floori(8.0 / 3.0) == 2, "floor(8/3) = 2")
-	_expect(floori(3.0 / 4.0) == 0, "ataque menor que defensa hace 0 daño")
+	# Daño por división: cuántos bloques completos de la defensa entran en el ataque.
+	_expect(floori(7.0 / 3.0) == 2, "ataque 7 contra defensa 3 = 2 bloques = 2 de daño")
+	_expect(floori(12.0 / 4.0) == 3, "ataque 12 contra defensa 4 = 3 de daño")
+	_expect(floori(4.0 / 4.0) == 1, "ataque igual a la defensa = 1 bloque = 1 de daño")
+	_expect(floori(3.0 / 4.0) == 0, "ataque menor que la defensa = 0 de daño")
 
 
 func _check_level_setup() -> void:
@@ -117,25 +120,107 @@ func _check_player_rules() -> void:
 	_expect(s.try_move_player(Vector2i(2, 3)), "mover ortogonal+diagonal (costo 5)")
 	_expect(s.speed_points == 2, "se descuentan los puntos de velocidad")
 
-	# Ataque: araña 2 en (4,2), jugador en (2,3): distancia 5 > alcance 2.
+	# Ataque por división: araña 2 en (4,2), jugador en (2,3): distancia > alcance 2.
 	var spider2: Dictionary = s.monster_at(Vector2i(4, 2))
 	var info := s.player_attack_info(spider2)
 	_expect(not info.in_range, "alcance 2 no llega a distancia 3")
 	# Acercamos al jugador de forma sintética: ortogonal adyacente.
 	s.player_pos = Vector2i(4, 3)
+	# attack_points = 4 (1 + dado 3), defensa 4 → floor(4/4) = 1 bloque = 1 de daño.
 	info = s.player_attack_info(spider2)
-	_expect(info.in_range and info.los and info.cost == 4, "araña adyacente ortogonal atacable, costo = defensa 4")
-	_expect(info.hits_affordable == 1, "con 4 puntos y defensa 4 alcanza floor(4/4) = 1 golpe")
-	_expect(s.player_attack(spider2), "primer golpe exitoso")
-	_expect(spider2.hp == 1 and s.attack_points == 0, "1 daño y se descuenta el costo")
+	_expect(info.in_range and info.los and info.damage == 1,
+		"ataque 4 contra defensa 4 = 1 bloque = 1 de daño")
+	_expect(info.can_attack, "se puede atacar si hay al menos un bloque completo")
+	_expect(s.player_attack(spider2), "ataque exitoso")
+	_expect(spider2.hp == 1 and s.has_attacked, "1 de daño y el ataque se consume (una vez por turno)")
+
+	# Ataque que no completa ni un bloque: 3 contra defensa 4 = 0 de daño.
+	s.has_attacked = false
+	s.attack_points = 3
 	info = s.player_attack_info(spider2)
-	_expect(not info.can_attack and not info.enough_points, "sin puntos no se puede seguir golpeando")
-	# Con 8 puntos se puede golpear dos veces al mismo monstruo: floor(8/4) = 2.
-	s.attack_points = 8
-	_expect(s.player_attack_info(spider2).hits_affordable == 2, "floor(8/4) = 2 golpes pagables")
-	_expect(s.player_attack(spider2), "segundo golpe al mismo monstruo permitido")
-	_expect(not s.monsters.has(spider2) and s.attack_points == 4,
-		"la araña muere con el segundo golpe y quedan 8-4 = 4 puntos")
+	_expect(info.damage == 0 and not info.can_attack, "ataque 3 contra defensa 4 = 0 de daño, no atacable")
+
+	# Un ataque por turno: tras atacar, has_attacked bloquea más ataques.
+	s.attack_points = 8  # floor(8/4) = 2 → remata a la araña (le quedaba 1 PV)
+	_expect(s.player_attack(spider2) and not s.monsters.has(spider2),
+		"ataque 8 contra defensa 4 = 2 de daño y la araña muere")
+	var spider1: Dictionary = s.monster_at(Vector2i(3, 0))
+	s.player_pos = Vector2i(4, 0)  # ortogonal adyacente a la araña 1
+	s.attack_points = 9
+	info = s.player_attack_info(spider1)
+	_expect(info.already_attacked and not info.can_attack, "ya atacaste: no se puede volver a atacar")
+	_expect(not s.player_attack(spider1), "player_attack falla si ya atacaste este turno")
+	# El turno siguiente vuelve a tirar/asignar y rehabilita el ataque.
+	s.new_turn()
+	_expect(s.phase == GameState.Phase.ASSIGN_DICE and not s.has_attacked,
+		"new_turn reinicia la fase de energía y rehabilita el ataque")
+	s.dice = [6, 3, 2]; s.dice_rolled = true
+	s.assign_die("speed", 0); s.assign_die("attack", 1); s.assign_die("defense", 2)
+	_expect(s.phase == GameState.Phase.PLAYER, "al reasignar los dados arranca de nuevo la fase del aventurero")
+	s.attack_points = 6
+	info = s.player_attack_info(spider1)
+	_expect(info.can_attack and info.damage == 1, "en el nuevo turno se puede atacar (floor(6/4) = 1)")
+
+
+func _check_reroll_power() -> void:
+	var s := GameState.new()
+	s.start_level(0)
+	_expect(s.reroll_available, "el poder de re-roll arranca disponible en cada nivel")
+	s.new_turn()
+	s.roll_dice()
+	_expect(s.phase == GameState.Phase.ASSIGN_DICE, "tras new_turn estamos en la fase de energía")
+	s.assign_die("speed", 0)
+	_expect(s.reroll_dice(), "se puede usar el poder de re-roll una vez")
+	_expect(s.assignment.is_empty(), "el re-roll limpia la asignación en curso")
+	_expect(not s.reroll_available, "el poder se consume al usarlo")
+	_expect(not s.reroll_dice(), "no se puede re-rollear dos veces en el mismo nivel")
+	# Fuera de la fase de energía el poder no se puede usar.
+	s.start_level(1)
+	_expect(s.reroll_available, "al empezar otro nivel el poder vuelve a estar disponible")
+	s.new_turn()
+	s.roll_dice()
+	s.assign_die("speed", 0)
+	s.assign_die("attack", 1)
+	s.assign_die("defense", 2)
+	_expect(s.phase == GameState.Phase.PLAYER and not s.reroll_dice(),
+		"en la fase del aventurero (dados ya asignados) no se puede re-rollear")
+
+
+func _check_undo() -> void:
+	var s := GameState.new()
+	s.start_level(0)
+	s.dice = [6, 3, 2]; s.dice_rolled = true
+	s.assign_die("speed", 0); s.assign_die("attack", 1); s.assign_die("defense", 2)
+	_expect(not s.can_undo(), "al empezar el turno no hay nada que deshacer")
+
+	# Mover y deshacer: vuelven posición y puntos de velocidad.
+	var start_pos := s.player_pos
+	var start_speed := s.speed_points
+	_expect(s.try_move_player(Vector2i(1, 4)), "mover una ortogonal")
+	_expect(s.can_undo() and s.player_pos == Vector2i(1, 4) and s.speed_points == start_speed - 2,
+		"tras mover hay algo que deshacer y se gastaron puntos")
+	_expect(s.undo(), "deshacer el movimiento")
+	_expect(s.player_pos == start_pos and s.speed_points == start_speed, "el movimiento se revierte")
+	_expect(not s.can_undo(), "ya no queda nada que deshacer")
+
+	# Atacar y deshacer: vuelven la vida del monstruo y el ataque del turno.
+	s.player_pos = Vector2i(4, 3)  # adyacente a la araña 2 en (4,2)
+	s.attack_points = 8  # floor(8/4) = 2 de daño → mata a la araña (2 PV)
+	var spider2: Dictionary = s.monster_at(Vector2i(4, 2))
+	var hp0: int = spider2.hp
+	_expect(s.player_attack(spider2), "atacar a la araña")
+	_expect(s.has_attacked and s.monster_at(Vector2i(4, 2)).is_empty(),
+		"el ataque mata a la araña (2 de daño) y marca el ataque usado")
+	_expect(s.undo(), "deshacer el ataque")
+	var restored: Dictionary = s.monster_at(Vector2i(4, 2))
+	_expect(not restored.is_empty() and restored.hp == hp0 and not s.has_attacked,
+		"el ataque se revierte: la araña vuelve con su vida y el ataque queda disponible")
+
+	# Un turno nuevo descarta el undo aunque haya acciones pendientes.
+	s.try_move_player(Vector2i(4, 4))
+	_expect(s.can_undo(), "hay una acción para deshacer")
+	s.new_turn()
+	_expect(not s.can_undo(), "un turno nuevo descarta el undo")
 
 
 func _make_monster(id: int, pos: Vector2i, speed: int, atk: int, def: int, rng: int) -> Dictionary:
